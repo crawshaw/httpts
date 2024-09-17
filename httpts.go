@@ -28,6 +28,9 @@ type Server struct {
 	ts      *tsnet.Server
 	httpsrv *http.Server
 	lc      *tailscale.LocalClient
+
+	ctx       context.Context
+	ctxCancel func()
 }
 
 // Who is attached to every http.Request context naming the HTTP client.
@@ -57,6 +60,7 @@ func (s *Server) mkhttpsrv() {
 	if s.httpsrv != nil {
 		return
 	}
+	s.ctx, s.ctxCancel = context.WithCancel(context.Background())
 	s.httpsrv = &http.Server{
 		Handler: http.HandlerFunc(s.whoHandler),
 	}
@@ -81,7 +85,7 @@ func (s *Server) Serve(tsHostname string) error {
 	s.mkhttpsrv()
 	confDir, err := os.UserConfigDir()
 	if err != nil {
-		return fmt.Errorf("httpsts: %w", err)
+		return fmt.Errorf("httpts: %w", err)
 	}
 
 	s.ts = &tsnet.Server{
@@ -90,24 +94,29 @@ func (s *Server) Serve(tsHostname string) error {
 	}
 	defer s.ts.Close()
 
+	// Call Up explicitly with a context that is canceled on Shutdown
+	// so we don't get stuck in ListenTLS on Shutdown.
+	if _, err := s.ts.Up(s.ctx); err != nil {
+		return fmt.Errorf("httpts: %w", err)
+	}
 	ln, err := s.ts.ListenTLS("tcp", ":443")
 	if err != nil {
-		return fmt.Errorf("httpsts: %w", err)
+		return fmt.Errorf("httpts: %w", err)
 	}
 	lc, err := s.ts.LocalClient()
 	if err != nil {
-		return fmt.Errorf("httpsts: %w", err)
+		return fmt.Errorf("httpts: %w", err)
 	}
 	s.lc = lc
 	if status, err := lc.Status(context.Background()); err != nil {
-		return fmt.Errorf("httpsts: %w", err)
+		return fmt.Errorf("httpts: %w", err)
 	} else {
 		log.Printf("Running: https://%s/\n", strings.TrimSuffix(status.Self.DNSName, "."))
 	}
 
 	ln80, err := s.ts.Listen("tcp", ":80")
 	if err != nil {
-		return fmt.Errorf("httpsts: %w", err)
+		return fmt.Errorf("httpts: %w", err)
 	}
 	srv80 := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		target := "https://" + r.Host + r.URL.Path
@@ -134,13 +143,10 @@ func (s *Server) Serve(tsHostname string) error {
 	return err
 }
 
-func (s *Server) RegisterOnShutdown(f func()) {
-	s.mkhttpsrv()
-	s.httpsrv.RegisterOnShutdown(f)
-}
-
 // Shutdown shuts down the HTTP server and Tailscale client.
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.ctxCancel()
+
 	err := s.httpsrv.Shutdown(ctx)
 	err2 := s.ts.Close()
 	if err == nil {

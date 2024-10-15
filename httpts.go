@@ -17,6 +17,7 @@ import (
 	"sync"
 
 	"tailscale.com/client/tailscale"
+	"tailscale.com/ipn"
 	"tailscale.com/tailcfg"
 	"tailscale.com/tsnet"
 )
@@ -27,6 +28,8 @@ type Server struct {
 	// InsecureLocalPortOnly, if non-zero, means that no tsnet server is started
 	// and instead the server listens over http:// on the specified 127.0.0.1 port.
 	InsecureLocalPortOnly int
+	// StateStore, if non-nil, is used to store state for the tailscale client.
+	StateStore ipn.StateStore
 
 	ts      *tsnet.Server
 	httpsrv *http.Server
@@ -37,7 +40,7 @@ type Server struct {
 
 	started struct {
 		mu sync.Mutex
-		ch chan struct{} // closed when tsnet is serving
+		ch chan struct{} // closed when tsnet is serving, access via startedCh
 	}
 }
 
@@ -127,6 +130,7 @@ func (s *Server) Serve(tsHostname string) error {
 
 	s.ts = &tsnet.Server{
 		Dir:      filepath.Join(confDir, "httpts-"+tsHostname),
+		Store:    s.StateStore,
 		Hostname: tsHostname,
 	}
 	defer s.ts.Close()

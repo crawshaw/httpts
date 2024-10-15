@@ -24,6 +24,9 @@ import (
 // Server is a drop-in for http.Server that serves a Handler on a tailnet.
 type Server struct {
 	Handler http.Handler
+	// InsecureLocalPortOnly, if non-zero, means that no tsnet server is started
+	// and instead the server listens over http:// on the specified 127.0.0.1 port.
+	InsecureLocalPortOnly int
 
 	ts      *tsnet.Server
 	httpsrv *http.Server
@@ -67,14 +70,19 @@ func (s *Server) mkhttpsrv() {
 }
 
 func (s *Server) whoHandler(w http.ResponseWriter, r *http.Request) {
-	whoResp, err := s.lc.WhoIs(r.Context(), r.RemoteAddr)
-	if err != nil {
-		http.Error(w, "httpts: "+err.Error(), http.StatusUnauthorized)
-		return
-	}
-	who := Who{
-		LoginName: whoResp.UserProfile.LoginName,
-		PeerCap:   whoResp.CapMap,
+	var who Who
+	if s.InsecureLocalPortOnly != 0 {
+		who = Who{LoginName: "insecure-localhost"}
+	} else {
+		whoResp, err := s.lc.WhoIs(r.Context(), r.RemoteAddr)
+		if err != nil {
+			http.Error(w, "httpts: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+		who = Who{
+			LoginName: whoResp.UserProfile.LoginName,
+			PeerCap:   whoResp.CapMap,
+		}
 	}
 	r = r.WithContext(context.WithValue(r.Context(), whoCtxKey, &who))
 	s.Handler.ServeHTTP(w, r)
@@ -83,6 +91,12 @@ func (s *Server) whoHandler(w http.ResponseWriter, r *http.Request) {
 // Serve serves :443 and a :80 redirect on a tailnet.
 func (s *Server) Serve(tsHostname string) error {
 	s.mkhttpsrv()
+	if s.InsecureLocalPortOnly != 0 {
+		s.httpsrv.Addr = fmt.Sprintf("127.0.0.1:%d", s.InsecureLocalPortOnly)
+		log.Printf("Serving: http://%s", s.httpsrv.Addr)
+		return s.httpsrv.ListenAndServe()
+	}
+
 	confDir, err := os.UserConfigDir()
 	if err != nil {
 		return fmt.Errorf("httpts: %w", err)
@@ -111,7 +125,7 @@ func (s *Server) Serve(tsHostname string) error {
 	if status, err := lc.Status(context.Background()); err != nil {
 		return fmt.Errorf("httpts: %w", err)
 	} else {
-		log.Printf("Running: https://%s/\n", strings.TrimSuffix(status.Self.DNSName, "."))
+		log.Printf("Serving: https://%s/\n", strings.TrimSuffix(status.Self.DNSName, "."))
 	}
 
 	ln80, err := s.ts.Listen("tcp", ":80")
@@ -146,9 +160,12 @@ func (s *Server) Serve(tsHostname string) error {
 // Shutdown shuts down the HTTP server and Tailscale client.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.ctxCancel()
-
-	err := s.httpsrv.Shutdown(ctx)
-	err2 := s.ts.Close()
+	var err, err2 error
+	err = s.httpsrv.Shutdown(ctx)
+	if s.ts != nil {
+		err2 = s.ts.Close()
+	}
+	s.ts = nil
 	if err == nil {
 		err = err2
 	}

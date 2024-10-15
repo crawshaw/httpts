@@ -1,8 +1,15 @@
-//+build ignore
+//go:build ignore
+// +build ignore
 
 // This example demos serving HTTP on your tailnet.
 //
-// To run:
+// To run entirely locally use:
+//
+//	go run ./example_httpts.go -devport 8080
+//
+// This is useful for local development on the bus.
+// To run on a tailnet, drop the -devport flag:
+//
 //	go run ./example_httpts.go
 //
 // The first time, a tailscale login URL will be printed to put it on a tailnet.
@@ -10,16 +17,21 @@
 package main
 
 import (
-	"net/http"
+	"flag"
 	"fmt"
 	"log"
+	"net/http"
 
 	"github.com/crawshaw/httpts"
 )
 
 func main() {
+	devPort := flag.Int("devport", 0, "localhost port to run in dev mode, 0 to disable")
+	flag.Parse()
+
 	s := httpts.Server{
-		Handler: http.HandlerFunc(handler),
+		Handler:               http.HandlerFunc(handler),
+		InsecureLocalPortOnly: *devPort,
 	}
 	log.Fatal(s.Serve("httpts-example"))
 }

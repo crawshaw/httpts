@@ -9,12 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"maps"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
+	"sync"
 
 	"tailscale.com/client/tailscale"
 	"tailscale.com/tailcfg"
@@ -34,6 +34,20 @@ type Server struct {
 
 	ctx       context.Context
 	ctxCancel func()
+
+	started struct {
+		mu sync.Mutex
+		ch chan struct{} // closed when tsnet is serving
+	}
+}
+
+func (s *Server) startedCh() chan struct{} {
+	s.started.mu.Lock()
+	defer s.started.mu.Unlock()
+	if s.started.ch == nil {
+		s.started.ch = make(chan struct{})
+	}
+	return s.started.ch
 }
 
 // Who is attached to every http.Request context naming the HTTP client.
@@ -42,14 +56,9 @@ type Who struct {
 	PeerCap   tailcfg.PeerCapMap
 }
 
-func (w Who) equal(other Who) bool {
-	return w.LoginName == other.LoginName &&
-		maps.EqualFunc(w.PeerCap, other.PeerCap, func(a, b []tailcfg.RawMessage) bool {
-			return slices.Equal(a, b)
-		})
-}
+type whoCtxKeyType struct{}
 
-var whoCtxKey = struct{}{}
+var whoCtxKey = whoCtxKeyType{}
 
 func WhoFromCtx(ctx context.Context) *Who {
 	who, ok := ctx.Value(whoCtxKey).(*Who)
@@ -88,6 +97,20 @@ func (s *Server) whoHandler(w http.ResponseWriter, r *http.Request) {
 	s.Handler.ServeHTTP(w, r)
 }
 
+// Dial dials the address on the tailnet.
+func (s *Server) Dial(ctx context.Context, network, address string) (net.Conn, error) {
+	if s.InsecureLocalPortOnly != 0 {
+		dialer := &net.Dialer{}
+		return dialer.DialContext(ctx, network, address)
+	}
+	select {
+	case <-s.startedCh():
+		return s.ts.Dial(ctx, network, address)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 // Serve serves :443 and a :80 redirect on a tailnet.
 func (s *Server) Serve(tsHostname string) error {
 	s.mkhttpsrv()
@@ -113,6 +136,7 @@ func (s *Server) Serve(tsHostname string) error {
 	if _, err := s.ts.Up(s.ctx); err != nil {
 		return fmt.Errorf("httpts: %w", err)
 	}
+	close(s.startedCh())
 	ln, err := s.ts.ListenTLS("tcp", ":443")
 	if err != nil {
 		return fmt.Errorf("httpts: %w", err)

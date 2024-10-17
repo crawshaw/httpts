@@ -108,6 +108,9 @@ type Server struct {
 	// used.
 	AuthKey string
 
+	// AdvertiseTags are the Tailscale tags this node should advertise.
+	AdvertiseTags []string
+
 	// ControlURL optionally specifies the coordination server URL.
 	// If empty, the Tailscale default is used.
 	ControlURL string
@@ -612,6 +615,7 @@ func (s *Server) start() (reterr error) {
 	prefs.Hostname = s.hostname
 	prefs.WantRunning = true
 	prefs.ControlURL = s.ControlURL
+	prefs.AdvertiseTags = s.AdvertiseTags
 	prefs.RunWebClient = s.RunWebClient
 	authKey := s.getAuthKey()
 	err = lb.Start(ipn.Options{

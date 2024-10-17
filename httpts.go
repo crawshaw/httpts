@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -16,10 +17,11 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/crawshaw/httpts/internal/tsnet"
+	"golang.org/x/oauth2/clientcredentials"
 	"tailscale.com/client/tailscale"
 	"tailscale.com/ipn"
 	"tailscale.com/tailcfg"
-	"tailscale.com/tsnet"
 )
 
 // Server is a drop-in for http.Server that serves a Handler on a tailnet.
@@ -30,6 +32,14 @@ type Server struct {
 	InsecureLocalPortOnly int
 	// StateStore, if non-nil, is used to store state for the tailscale client.
 	StateStore ipn.StateStore
+
+	AdvertiseTags []string
+
+	// OauthClientSecret is used to authenticate the node if it is not already.
+	// Create one at https://login.tailscale.com/admin/settings/oauth.
+	// The client must be created with a tag that matches AdvertiseTags.
+	// Note that the client secret must start with `tskey-client-`.
+	OauthClientSecret string
 
 	ts      *tsnet.Server
 	httpsrv *http.Server
@@ -129,11 +139,23 @@ func (s *Server) Serve(tsHostname string) error {
 	}
 
 	s.ts = &tsnet.Server{
-		Dir:      filepath.Join(confDir, "httpts-"+tsHostname),
-		Store:    s.StateStore,
-		Hostname: tsHostname,
+		Dir:           filepath.Join(confDir, "httpts-"+tsHostname),
+		Store:         s.StateStore,
+		Hostname:      tsHostname,
+		AdvertiseTags: s.AdvertiseTags,
 	}
 	defer s.ts.Close()
+
+	if s.OauthClientSecret != "" {
+		oauthCfg, err := tsClientConfig(s.OauthClientSecret)
+		if err != nil {
+			return fmt.Errorf("httpts: %w", err)
+		}
+		if err := checkTSClientConfig(s.ctx, oauthCfg); err != nil {
+			return fmt.Errorf("httpts: %w", err)
+		}
+		s.ts.AuthKey = oauthCfg.ClientSecret
+	}
 
 	// Call Up explicitly with a context that is canceled on Shutdown
 	// so we don't get stuck in ListenTLS on Shutdown.
@@ -198,4 +220,33 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		err = err2
 	}
 	return err
+}
+
+func tsClientConfig(clientSecret string) (*clientcredentials.Config, error) {
+	oauthConfig := &clientcredentials.Config{
+		ClientSecret: clientSecret,
+		TokenURL:     "https://api.tailscale.com/api/v2/oauth/token",
+	}
+	if s := strings.TrimPrefix(oauthConfig.ClientSecret, "tskey-client-"); s == oauthConfig.ClientSecret {
+		return nil, fmt.Errorf("OauthClientSecret must start with `tskey-client-`")
+	} else {
+		oauthConfig.ClientID, _, _ = strings.Cut(s, "-")
+	}
+	return oauthConfig, nil
+}
+
+func checkTSClientConfig(ctx context.Context, oauthConfig *clientcredentials.Config) error {
+	tsClient := oauthConfig.Client(ctx)
+	resp, err := tsClient.Get("https://api.tailscale.com/api/v2/tailnet/-/devices")
+	if err != nil {
+		return fmt.Errorf("oauth client failure: %w", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("oauth client failure: %w", err)
+	}
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("basic device list failed: %s", body)
+	}
+	return nil
 }

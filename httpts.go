@@ -133,34 +133,41 @@ func (s *Server) Serve(tsHostname string) error {
 		return s.httpsrv.ListenAndServe()
 	}
 
-	confDir, err := os.UserConfigDir()
-	if err != nil {
-		return fmt.Errorf("httpts: %w", err)
-	}
-
 	s.ts = &tsnet.Server{
-		Dir:           filepath.Join(confDir, "httpts-"+tsHostname),
 		Store:         s.StateStore,
 		Hostname:      tsHostname,
 		AdvertiseTags: s.AdvertiseTags,
 	}
 	defer s.ts.Close()
 
-	if s.OauthClientSecret != "" {
-		oauthCfg, err := tsClientConfig(s.OauthClientSecret)
+	// If this is the first time loading this server, create an auth key.
+	initialLoad := false
+	if s.StateStore != nil {
+		if _, err := s.StateStore.ReadState(ipn.MachineKeyStateKey); errors.Is(err, ipn.ErrStateNotExist) {
+			initialLoad = true
+		}
+	} else {
+		confDir, err := os.UserConfigDir()
 		if err != nil {
 			return fmt.Errorf("httpts: %w", err)
 		}
-		if err := checkTSClientConfig(s.ctx, oauthCfg); err != nil {
-			return fmt.Errorf("httpts: %w", err)
+		s.ts.Dir = filepath.Join(confDir, "httpts-"+tsHostname)
+		if _, err := os.Stat(s.ts.Dir); os.IsNotExist(err) {
+			initialLoad = true
 		}
-		s.ts.AuthKey = oauthCfg.ClientSecret
+	}
+	if initialLoad && s.OauthClientSecret != "" {
+		var err error
+		s.ts.AuthKey, err = s.createAuthKey(context.Background())
+		if err != nil {
+			return fmt.Errorf("httpts: create auth key: %w", err)
+		}
 	}
 
 	// Call Up explicitly with a context that is canceled on Shutdown
 	// so we don't get stuck in ListenTLS on Shutdown.
 	if _, err := s.ts.Up(s.ctx); err != nil {
-		return fmt.Errorf("httpts: %w", err)
+		return fmt.Errorf("httpts.up: %w", err)
 	}
 	close(s.startedCh())
 	ln, err := s.ts.ListenTLS("tcp", ":443")
@@ -249,4 +256,34 @@ func checkTSClientConfig(ctx context.Context, oauthConfig *clientcredentials.Con
 		return fmt.Errorf("basic device list failed: %s", body)
 	}
 	return nil
+}
+
+func (s *Server) createAuthKey(ctx context.Context) (string, error) {
+	oauthCfg, err := tsClientConfig(s.OauthClientSecret)
+	if err != nil {
+		return "", err
+	}
+	if err := checkTSClientConfig(s.ctx, oauthCfg); err != nil {
+		return "", err
+	}
+
+	tailscale.I_Acknowledge_This_API_Is_Unstable = true
+	tsClient := tailscale.NewClient("-", nil)
+	tsClient.HTTPClient = oauthCfg.Client(ctx)
+
+	caps := tailscale.KeyCapabilities{
+		Devices: tailscale.KeyDeviceCapabilities{
+			Create: tailscale.KeyDeviceCreateCapabilities{
+				Reusable:      false,
+				Ephemeral:     false, // TODO export
+				Preauthorized: true,  // false, // TODO export
+				Tags:          s.AdvertiseTags,
+			},
+		},
+	}
+	authkey, _, err := tsClient.CreateKey(ctx, caps)
+	if err != nil {
+		return "", err
+	}
+	return authkey, nil
 }

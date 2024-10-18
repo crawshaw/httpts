@@ -133,34 +133,24 @@ func (s *Server) Serve(tsHostname string) error {
 		return s.httpsrv.ListenAndServe()
 	}
 
+	confDir, err := os.UserConfigDir()
+	if err != nil {
+		return fmt.Errorf("httpts: %w", err)
+	}
+
 	s.ts = &tsnet.Server{
+		Dir:           filepath.Join(confDir, "httpts-"+tsHostname),
 		Store:         s.StateStore,
 		Hostname:      tsHostname,
 		AdvertiseTags: s.AdvertiseTags,
 	}
 	defer s.ts.Close()
 
-	// If this is the first time loading this server, create an auth key.
-	initialLoad := false
-	if s.StateStore != nil {
-		if _, err := s.StateStore.ReadState(ipn.MachineKeyStateKey); errors.Is(err, ipn.ErrStateNotExist) {
-			initialLoad = true
-		}
-	} else {
-		confDir, err := os.UserConfigDir()
-		if err != nil {
-			return fmt.Errorf("httpts: %w", err)
-		}
-		s.ts.Dir = filepath.Join(confDir, "httpts-"+tsHostname)
-		if _, err := os.Stat(s.ts.Dir); os.IsNotExist(err) {
-			initialLoad = true
-		}
-	}
-	if initialLoad && s.OauthClientSecret != "" {
+	if s.OauthClientSecret != "" {
 		var err error
-		s.ts.AuthKey, err = s.createAuthKey(context.Background())
+		s.ts.AuthKey, err = s.createAuthKey(s.ctx)
 		if err != nil {
-			return fmt.Errorf("httpts: create auth key: %w", err)
+			return fmt.Errorf("create auth key: %w", err)
 		}
 	}
 

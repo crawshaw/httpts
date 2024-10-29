@@ -39,7 +39,15 @@ type Server struct {
 	// Create one at https://login.tailscale.com/admin/settings/oauth.
 	// The client must be created with a tag that matches AdvertiseTags.
 	// Note that the client secret must start with `tskey-client-`.
+	//
+	// Ignored if AuthKey is non-empty.
+	//
+	// Do not pass an OauthClientSecret to a server that you do not trust
+	// to add nodes to your tailnet.
 	OauthClientSecret string
+
+	// AuthKey, if non-empty, is the auth key to create the node.
+	AuthKey string
 
 	ts      *tsnet.Server
 	httpsrv *http.Server
@@ -124,6 +132,16 @@ func (s *Server) Dial(ctx context.Context, network, address string) (net.Conn, e
 	}
 }
 
+// ListenFunnel listens on the public internet using Tailscale Funnel.
+func (s *Server) ListenFunnel(ctx context.Context, network, addr string, opts ...tsnet.FunnelOption) (net.Listener, error) {
+	select {
+	case <-s.startedCh():
+		return s.ts.ListenFunnel(network, addr, opts...)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 // Serve serves :443 and a :80 redirect on a tailnet.
 func (s *Server) Serve(tsHostname string) error {
 	s.mkhttpsrv()
@@ -143,10 +161,11 @@ func (s *Server) Serve(tsHostname string) error {
 		Store:         s.StateStore,
 		Hostname:      tsHostname,
 		AdvertiseTags: s.AdvertiseTags,
+		AuthKey:       s.AuthKey,
 	}
 	defer s.ts.Close()
 
-	if s.OauthClientSecret != "" {
+	if s.AuthKey == "" && s.OauthClientSecret != "" {
 		var err error
 		s.ts.AuthKey, err = s.createAuthKey(s.ctx)
 		if err != nil {
@@ -249,11 +268,20 @@ func checkTSClientConfig(ctx context.Context, oauthConfig *clientcredentials.Con
 }
 
 func (s *Server) createAuthKey(ctx context.Context) (string, error) {
-	oauthCfg, err := tsClientConfig(s.OauthClientSecret)
+	return CreateAuthKey(ctx, s.OauthClientSecret, tailscale.KeyDeviceCreateCapabilities{
+		Reusable:      false,
+		Ephemeral:     false, // TODO export
+		Preauthorized: true,  // false, // TODO export
+		Tags:          s.AdvertiseTags,
+	})
+}
+
+func CreateAuthKey(ctx context.Context, clientSecret string, deviceCaps tailscale.KeyDeviceCreateCapabilities) (string, error) {
+	oauthCfg, err := tsClientConfig(clientSecret)
 	if err != nil {
 		return "", err
 	}
-	if err := checkTSClientConfig(s.ctx, oauthCfg); err != nil {
+	if err := checkTSClientConfig(ctx, oauthCfg); err != nil {
 		return "", err
 	}
 
@@ -263,12 +291,7 @@ func (s *Server) createAuthKey(ctx context.Context) (string, error) {
 
 	caps := tailscale.KeyCapabilities{
 		Devices: tailscale.KeyDeviceCapabilities{
-			Create: tailscale.KeyDeviceCreateCapabilities{
-				Reusable:      false,
-				Ephemeral:     false, // TODO export
-				Preauthorized: true,  // false, // TODO export
-				Tags:          s.AdvertiseTags,
-			},
+			Create: deviceCaps,
 		},
 	}
 	authkey, _, err := tsClient.CreateKey(ctx, caps)

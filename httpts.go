@@ -26,10 +26,18 @@ import (
 
 // Server is a drop-in for http.Server that serves a Handler on a tailnet.
 type Server struct {
+	// Handler answers requests from the tailnet.
 	Handler http.Handler
+
+	// FunnelHandler, if non-nil, answers requsts from the internet via Tailscale Funnel.
+	// Unused if InsecureLocalPortOnly is true.
+	FunnelHandler http.Handler
+
 	// InsecureLocalPortOnly, if non-zero, means that no tsnet server is started
 	// and instead the server listens over http:// on the specified 127.0.0.1 port.
+	// It is insecure because all localhost handling is passed to Handler.
 	InsecureLocalPortOnly int
+
 	// StateStore, if non-nil, is used to store state for the tailscale client.
 	StateStore ipn.StateStore
 
@@ -105,7 +113,11 @@ func (s *Server) whoHandler(w http.ResponseWriter, r *http.Request) {
 		who = Who{LoginName: "insecure-localhost"}
 	} else {
 		whoResp, err := s.lc.WhoIs(r.Context(), r.RemoteAddr)
-		if err != nil {
+		if s.FunnelHandler != nil && errors.Is(err, tailscale.ErrPeerNotFound) {
+			// TODO: pass an empty Who?
+			s.FunnelHandler.ServeHTTP(w, r)
+			return
+		} else if err != nil {
 			http.Error(w, "httpts: "+err.Error(), http.StatusUnauthorized)
 			return
 		}
@@ -127,16 +139,6 @@ func (s *Server) Dial(ctx context.Context, network, address string) (net.Conn, e
 	select {
 	case <-s.startedCh():
 		return s.ts.Dial(ctx, network, address)
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-}
-
-// ListenFunnel listens on the public internet using Tailscale Funnel.
-func (s *Server) ListenFunnel(ctx context.Context, network, addr string, opts ...tsnet.FunnelOption) (net.Listener, error) {
-	select {
-	case <-s.startedCh():
-		return s.ts.ListenFunnel(network, addr, opts...)
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -179,7 +181,13 @@ func (s *Server) Serve(tsHostname string) error {
 		return fmt.Errorf("httpts.up: %w", err)
 	}
 	close(s.startedCh())
-	ln, err := s.ts.ListenTLS("tcp", ":443")
+
+	var ln net.Listener
+	if s.FunnelHandler != nil {
+		ln, err = s.ts.ListenFunnel("tcp", ":443")
+	} else {
+		ln, err = s.ts.ListenTLS("tcp", ":443")
+	}
 	if err != nil {
 		return fmt.Errorf("httpts: %w", err)
 	}

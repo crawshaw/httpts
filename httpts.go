@@ -309,3 +309,9 @@ func CreateAuthKey(ctx context.Context, clientSecret string, deviceCaps tailscal
 	}
 	return authkey, nil
 }
+
+// TestWhoRequest sets up a Who object on a http.Request for use in testing.
+func TestWhoRequest(r *http.Request) *http.Request {
+	who := Who{LoginName: "insecure-test"}
+	return r.WithContext(context.WithValue(r.Context(), whoCtxKey, &who))
+}
